@@ -5,12 +5,12 @@ use ark_story_plaintext::parser;
 use ark_story_plaintext::renderer;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let input_dir = Path::new("Inputs");
+    let input_dir = Path::new("inputs");
     let output_dir = Path::new("outputs");
     let output_file = output_dir.join("story.txt");
 
     if !input_dir.exists() {
-        eprintln!("Error: Inputs/ directory not found");
+        eprintln!("Error: inputs/ directory not found");
         std::process::exit(1);
     }
 
