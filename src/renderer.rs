@@ -6,43 +6,37 @@ use crate::parser::Event;
 /// - Double line breaks (`\n\n`) between paragraphs.
 /// - Blockquote (`> `) for subtitles and stickers.
 pub fn render(events: &[Event]) -> String {
-    let mut parts: Vec<String> = Vec::new();
+    let mut out = String::with_capacity(events.len() * 64);
 
-    for event in events {
+    for (i, event) in events.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n\n");
+        }
         match event {
             Event::Narration(text) => {
-                parts.push(escape_narration(text));
+                if text.starts_with('>') {
+                    out.push('\\');
+                }
+                out.push_str(text);
             }
             Event::Dialogue { speaker, text } => {
-                parts.push(format!("{speaker}\u{FF1A}{text}"));
+                out.push_str(speaker);
+                out.push('\u{FF1A}');
+                out.push_str(text);
             }
-            Event::Subtitle(text) => {
-                parts.push(format_blockquote(text));
-            }
-            Event::Sticker(text) => {
-                parts.push(format_blockquote(text));
+            Event::Subtitle(text) | Event::Sticker(text) => {
+                for (j, line) in text.lines().enumerate() {
+                    if j > 0 {
+                        out.push('\n');
+                    }
+                    out.push_str("> ");
+                    out.push_str(line);
+                }
             }
         }
     }
 
-    parts.join("\n\n")
-}
-
-/// Format text as a Markdown blockquote, with `> ` prefix on each line.
-fn format_blockquote(text: &str) -> String {
-    text.lines()
-        .map(|line| format!("> {line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Escape narration text that starts with `>` to prevent Markdown blockquote interpretation.
-fn escape_narration(text: &str) -> String {
-    if text.starts_with('>') {
-        format!("\\{text}")
-    } else {
-        text.to_string()
-    }
+    out
 }
 
 #[cfg(test)]
@@ -118,7 +112,6 @@ mod tests {
 
     #[test]
     fn render_subtitle_with_empty_line() {
-        // Text with \n\n produces an empty line in the blockquote.
         let events = vec![Event::Subtitle("a\n\nb".into())];
         assert_eq!(render(&events), "> a\n> \n> b");
     }

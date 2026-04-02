@@ -1,11 +1,29 @@
 /// A token produced by the lexer from a single input line.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Token {
-    /// A bracketed tag. `name` is lowercase-normalized for easy matching.
-    /// `raw_inner` is everything between `[` and `]`, preserved for parameter extraction.
-    Tag { name: String, raw_inner: String },
+pub enum Token<'a> {
+    /// A bracketed tag. `raw_inner` borrows from the original line
+    /// (everything between `[` and `]`).
+    Tag { raw_inner: &'a str },
     /// Text content (either standalone plain text or trailing text after tags).
-    Text(String),
+    Text(&'a str),
+}
+
+/// Extract the tag name from raw_inner and compare case-insensitively.
+/// The tag name is the leading identifier before `(`, `=`, whitespace, or end.
+pub fn tag_name_eq(raw_inner: &str, expected: &str) -> bool {
+    let bytes = raw_inner.as_bytes();
+    let expected_bytes = expected.as_bytes();
+    let name_end = bytes
+        .iter()
+        .position(|&b| b == b'(' || b == b'=' || b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    if name_end != expected_bytes.len() {
+        return false;
+    }
+    bytes[..name_end]
+        .iter()
+        .zip(expected_bytes)
+        .all(|(&a, &b)| a.to_ascii_lowercase() == b)
 }
 
 /// Tokenize a single input line into a sequence of `Token`s.
@@ -14,53 +32,51 @@ pub enum Token {
 /// - Lines starting with `[` are split into `Tag` and optional trailing `Text`.
 /// - Inside a tag, quoted strings (`"..."`) are respected so that `]` inside quotes
 ///   does not prematurely close the tag.
-pub fn tokenize_line(line: &str) -> Vec<Token> {
+pub fn tokenize_line(line: &str) -> Vec<Token<'_>> {
     let s = line.trim_end();
     if s.is_empty() {
         return vec![];
     }
-    if !s.starts_with('[') {
-        return vec![Token::Text(s.to_string())];
+    let bytes = s.as_bytes();
+    if bytes[0] != b'[' {
+        return vec![Token::Text(s)];
     }
 
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
+    let len = bytes.len();
     let mut i = 0;
     let mut tokens = Vec::new();
 
     while i < len {
-        if chars[i] == '[' {
-            // Parse a tag: find the matching `]` respecting quoted strings.
+        if bytes[i] == b'[' {
             i += 1; // skip `[`
             let start = i;
             let mut in_quote = false;
             while i < len {
+                let b = bytes[i];
                 if in_quote {
-                    if chars[i] == '\\' && i + 1 < len && chars[i + 1] == '"' {
-                        i += 2; // skip escaped quote
+                    if b == b'\\' && i + 1 < len && bytes[i + 1] == b'"' {
+                        i += 2;
                         continue;
                     }
-                    if chars[i] == '"' {
+                    if b == b'"' {
                         in_quote = false;
                     }
                 } else {
-                    if chars[i] == '"' {
+                    if b == b'"' {
                         in_quote = true;
-                    } else if chars[i] == ']' {
+                    } else if b == b']' {
                         break;
                     }
                 }
                 i += 1;
             }
-            let raw_inner: String = chars[start..i].iter().collect();
-            let name = extract_tag_name(&raw_inner);
-            tokens.push(Token::Tag { name, raw_inner });
+            let raw_inner = &s[start..i];
+            tokens.push(Token::Tag { raw_inner });
             if i < len {
                 i += 1; // skip `]`
             }
         } else {
-            // Remaining text after all tags.
-            let text: String = chars[i..].iter().collect();
+            let text = &s[i..];
             if !text.is_empty() {
                 tokens.push(Token::Text(text));
             }
@@ -71,83 +87,60 @@ pub fn tokenize_line(line: &str) -> Vec<Token> {
     tokens
 }
 
-/// Extract and lowercase the tag name from the raw inner content.
-///
-/// The tag name is the leading identifier before `(`, `=`, whitespace, or end of string.
-fn extract_tag_name(raw_inner: &str) -> String {
-    let mut name = String::new();
-    for ch in raw_inner.chars() {
-        if ch == '(' || ch == '=' || ch.is_whitespace() {
-            break;
-        }
-        name.push(ch);
-    }
-    name.to_lowercase()
-}
-
 /// Extract a named parameter's value from a tag's raw inner content.
 ///
 /// Handles both quoted values (`key="value"`, `key = "value"`) and
 /// unquoted values (`key=123`, `key = true`).
 ///
 /// Returns `None` if the key is not found.
-pub fn extract_param(raw_inner: &str, key: &str) -> Option<String> {
-    // We need to find `key` followed by optional whitespace and `=`.
-    // We must ensure `key` is at a word boundary (preceded by start, `(`, `,`, or whitespace).
-    let chars: Vec<char> = raw_inner.chars().collect();
-    let key_chars: Vec<char> = key.chars().collect();
-    let len = chars.len();
-    let klen = key_chars.len();
+pub fn extract_param<'a>(raw_inner: &'a str, key: &str) -> Option<&'a str> {
+    let bytes = raw_inner.as_bytes();
+    let key_bytes = key.as_bytes();
+    let len = bytes.len();
+    let klen = key_bytes.len();
 
     let mut i = 0;
     while i + klen <= len {
-        // Check boundary: must be at start or preceded by `(`, `,`, or whitespace.
         let at_boundary = i == 0
-            || chars[i - 1] == '('
-            || chars[i - 1] == ','
-            || chars[i - 1].is_whitespace();
+            || bytes[i - 1] == b'('
+            || bytes[i - 1] == b','
+            || bytes[i - 1].is_ascii_whitespace();
 
-        if at_boundary && chars[i..i + klen].iter().collect::<String>() == key.to_string() {
-            // After the key, skip optional whitespace, then expect `=`.
+        if at_boundary && &bytes[i..i + klen] == key_bytes {
             let mut j = i + klen;
-            while j < len && chars[j].is_whitespace() {
+            while j < len && bytes[j].is_ascii_whitespace() {
                 j += 1;
             }
-            if j < len && chars[j] == '=' {
-                j += 1; // skip `=`
-                while j < len && chars[j].is_whitespace() {
+            if j < len && bytes[j] == b'=' {
+                j += 1;
+                while j < len && bytes[j].is_ascii_whitespace() {
                     j += 1;
                 }
                 if j < len {
-                    if chars[j] == '"' {
-                        // Quoted value: read until closing unescaped `"`.
+                    if bytes[j] == b'"' {
                         j += 1; // skip opening `"`
-                        let mut value = String::new();
+                        let start = j;
                         while j < len {
-                            if chars[j] == '\\' && j + 1 < len && chars[j + 1] == '"' {
-                                value.push('"');
+                            if bytes[j] == b'\\' && j + 1 < len && bytes[j + 1] == b'"' {
                                 j += 2;
                                 continue;
                             }
-                            if chars[j] == '"' {
+                            if bytes[j] == b'"' {
                                 break;
                             }
-                            value.push(chars[j]);
                             j += 1;
                         }
-                        return Some(value);
+                        return Some(&raw_inner[start..j]);
                     } else {
-                        // Unquoted value: read until `,`, `)`, or whitespace.
                         let start = j;
                         while j < len
-                            && chars[j] != ','
-                            && chars[j] != ')'
-                            && !chars[j].is_whitespace()
+                            && bytes[j] != b','
+                            && bytes[j] != b')'
+                            && !bytes[j].is_ascii_whitespace()
                         {
                             j += 1;
                         }
-                        let value: String = chars[start..j].iter().collect();
-                        return Some(value);
+                        return Some(&raw_inner[start..j]);
                     }
                 }
             }
@@ -166,13 +159,13 @@ mod tests {
     #[test]
     fn plain_text() {
         let tokens = tokenize_line("她坐在树桩上一边哼着歌");
-        assert_eq!(tokens, vec![Token::Text("她坐在树桩上一边哼着歌".into())]);
+        assert_eq!(tokens, vec![Token::Text("她坐在树桩上一边哼着歌")]);
     }
 
     #[test]
     fn empty_line() {
-        assert_eq!(tokenize_line(""), vec![]);
-        assert_eq!(tokenize_line("   "), vec![]);
+        assert_eq!(tokenize_line(""), Vec::<Token>::new());
+        assert_eq!(tokenize_line("   "), Vec::<Token>::new());
     }
 
     #[test]
@@ -182,10 +175,9 @@ mod tests {
             tokens,
             vec![
                 Token::Tag {
-                    name: "name".into(),
-                    raw_inner: r#"name="锡人""#.into()
+                    raw_inner: r#"name="锡人""#
                 },
-                Token::Text("呼......熟悉的气味".into()),
+                Token::Text("呼......熟悉的气味"),
             ]
         );
     }
@@ -193,42 +185,27 @@ mod tests {
     #[test]
     fn simple_tag_no_params() {
         let tokens = tokenize_line("[Dialog]");
-        assert_eq!(
-            tokens,
-            vec![Token::Tag {
-                name: "dialog".into(),
-                raw_inner: "Dialog".into()
-            }]
-        );
+        assert_eq!(tokens, vec![Token::Tag { raw_inner: "Dialog" }]);
     }
 
     #[test]
     fn tag_case_insensitive() {
         let tokens = tokenize_line("[HEADER(key=\"test\")]");
-        assert_eq!(tokens[0], Token::Tag {
-            name: "header".into(),
-            raw_inner: "HEADER(key=\"test\")".into(),
-        });
+        assert!(tag_name_eq(if let Token::Tag { raw_inner } = &tokens[0] { raw_inner } else { "" }, "header"));
     }
 
     #[test]
     fn tag_with_parens() {
         let tokens = tokenize_line("[Delay(time=1)]");
-        assert_eq!(
-            tokens,
-            vec![Token::Tag {
-                name: "delay".into(),
-                raw_inner: "Delay(time=1)".into()
-            }]
-        );
+        assert_eq!(tokens, vec![Token::Tag { raw_inner: "Delay(time=1)" }]);
     }
 
     #[test]
     fn subtitle_tag() {
         let tokens = tokenize_line(r#"[Subtitle(text="hello world", x=300)]"#);
         assert_eq!(tokens.len(), 1);
-        if let Token::Tag { name, raw_inner } = &tokens[0] {
-            assert_eq!(name, "subtitle");
+        if let Token::Tag { raw_inner } = &tokens[0] {
+            assert!(tag_name_eq(raw_inner, "subtitle"));
             assert!(raw_inner.contains("hello world"));
         } else {
             panic!("expected Tag");
@@ -240,8 +217,8 @@ mod tests {
         let line = r#"[Sticker(id="st1", text="<i>hello</i>", x=320)]"#;
         let tokens = tokenize_line(line);
         assert_eq!(tokens.len(), 1);
-        if let Token::Tag { name, raw_inner } = &tokens[0] {
-            assert_eq!(name, "sticker");
+        if let Token::Tag { raw_inner } = &tokens[0] {
+            assert!(tag_name_eq(raw_inner, "sticker"));
             assert!(raw_inner.contains("<i>hello</i>"));
         } else {
             panic!("expected Tag");
@@ -250,7 +227,6 @@ mod tests {
 
     #[test]
     fn quoted_string_containing_bracket() {
-        // Hypothetical: `]` inside quoted string must not end the tag.
         let line = r#"[Tag(text="a]b")]"#;
         let tokens = tokenize_line(line);
         assert_eq!(tokens.len(), 1);
@@ -265,24 +241,15 @@ mod tests {
     fn multiple_tags_on_one_line() {
         let tokens = tokenize_line("[Dialog][Blocker(a=1)]");
         assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0], Token::Tag {
-            name: "dialog".into(),
-            raw_inner: "Dialog".into(),
-        });
-        assert_eq!(tokens[1], Token::Tag {
-            name: "blocker".into(),
-            raw_inner: "Blocker(a=1)".into(),
-        });
+        assert_eq!(tokens[0], Token::Tag { raw_inner: "Dialog" });
+        assert_eq!(tokens[1], Token::Tag { raw_inner: "Blocker(a=1)" });
     }
 
     #[test]
     fn trailing_whitespace_only() {
         let tokens = tokenize_line("[Dialog]   ");
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0], Token::Tag {
-            name: "dialog".into(),
-            raw_inner: "Dialog".into(),
-        });
+        assert_eq!(tokens[0], Token::Tag { raw_inner: "Dialog" });
     }
 
     #[test]
@@ -291,15 +258,13 @@ mod tests {
         let tokens = tokenize_line(line);
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0], Token::Tag {
-            name: "multiline".into(),
-            raw_inner: r#"multiline(name="缪尔赛思")"#.into(),
+            raw_inner: r#"multiline(name="缪尔赛思")"#,
         });
-        assert_eq!(tokens[1], Token::Text("......塞雷娅！".into()));
+        assert_eq!(tokens[1], Token::Text("......塞雷娅！"));
     }
 
     #[test]
     fn chinese_quotes_in_text_param() {
-        // Chinese quotes \u{201c} \u{201d} are NOT ASCII " — they don't affect parsing.
         let line = format!(
             "[Subtitle(text=\"\u{201c}\u{201d}\u{201c}家\u{201d}\")]"
         );
@@ -317,15 +282,15 @@ mod tests {
     #[test]
     fn extract_text_param() {
         let inner = r#"Subtitle(text="hello world", x=300)"#;
-        assert_eq!(extract_param(inner, "text"), Some("hello world".into()));
+        assert_eq!(extract_param(inner, "text"), Some("hello world"));
     }
 
     #[test]
     fn extract_with_variable_spacing() {
         let inner = r#"Sticker(id="st1", multi = true, text="abc")"#;
-        assert_eq!(extract_param(inner, "multi"), Some("true".into()));
-        assert_eq!(extract_param(inner, "text"), Some("abc".into()));
-        assert_eq!(extract_param(inner, "id"), Some("st1".into()));
+        assert_eq!(extract_param(inner, "multi"), Some("true"));
+        assert_eq!(extract_param(inner, "text"), Some("abc"));
+        assert_eq!(extract_param(inner, "id"), Some("st1"));
     }
 
     #[test]
@@ -337,38 +302,37 @@ mod tests {
     #[test]
     fn extract_name_from_name_tag() {
         let inner = r#"name="锡人""#;
-        assert_eq!(extract_param(inner, "name"), Some("锡人".into()));
+        assert_eq!(extract_param(inner, "name"), Some("锡人"));
     }
 
     #[test]
     fn extract_name_from_multiline_tag() {
         let inner = r#"multiline(name="缪尔赛思")"#;
-        assert_eq!(extract_param(inner, "name"), Some("缪尔赛思".into()));
+        assert_eq!(extract_param(inner, "name"), Some("缪尔赛思"));
     }
 
     #[test]
     fn extract_unquoted_numeric() {
         let inner = "Delay(time=1.5)";
-        assert_eq!(extract_param(inner, "time"), Some("1.5".into()));
+        assert_eq!(extract_param(inner, "time"), Some("1.5"));
     }
 
     #[test]
     fn extract_param_not_substring_match() {
-        // "id" should not match "width"
         let inner = r#"Sticker(id="st1", width=700)"#;
-        assert_eq!(extract_param(inner, "id"), Some("st1".into()));
-        assert_eq!(extract_param(inner, "width"), Some("700".into()));
+        assert_eq!(extract_param(inner, "id"), Some("st1"));
+        assert_eq!(extract_param(inner, "width"), Some("700"));
     }
 
     #[test]
     fn extract_text_with_html() {
         let inner = r#"Sticker(id="st1", text="<i>hello</i>")"#;
-        assert_eq!(extract_param(inner, "text"), Some("<i>hello</i>".into()));
+        assert_eq!(extract_param(inner, "text"), Some("<i>hello</i>"));
     }
 
     #[test]
     fn extract_text_with_escaped_newline() {
         let inner = r#"Subtitle(text="line1\nline2")"#;
-        assert_eq!(extract_param(inner, "text"), Some(r"line1\nline2".into()));
+        assert_eq!(extract_param(inner, "text"), Some(r"line1\nline2"));
     }
 }
